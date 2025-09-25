@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Rompecabezas (mejorado) - Arrastra y suelta</title>
+<style>
+  :root { --board-width: 800px; --accent:#2b6cb0; --bg:#f7f7f8; }
+  body{
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    background: var(--bg);
+    margin:0; padding:18px; display:flex; justify-content:center;
+  }
+  .container{ max-width:1200px; width:100%; display:flex; gap:18px; align-items:flex-start; }
+  .card{ background:white; border-radius:10px; padding:12px; box-shadow:0 8px 24px rgba(0,0,0,0.06); }
+  .left{ width: calc(var(--board-width) + 28px); }
+  .controls{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  input[type=number], input[type=file], select { padding:6px 8px; border-radius:6px; border:1px solid #ddd; }
+  button{ background:var(--accent); color:#fff; border:none; padding:8px 10px; border-radius:8px; cursor:pointer; }
+  button.secondary{ background:#6b7280; }
+  #board{
+    width: var(--board-width);
+    height: auto;
+    background:#e9e9ea;
+    border-radius:8px;
+    position:relative;
+    overflow:hidden;
+    touch-action:none;
+    min-height:300px;
+  }
+  .piece-canvas{
+    position:absolute;
+    touch-action:none;
+    cursor:grab;
+    border-radius:6px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+    user-select:none;
+  }
+  .piece-canvas:active{ cursor:grabbing; transform:scale(1.02); transition:transform .12s; }
+  .right{ width:360px; display:flex; flex-direction:column; gap:12px; }
+  .preview{ width:100%; height:180px; border-radius:8px; overflow:hidden; background:#f0f0f0; display:flex; align-items:center; justify-content:center; }
+  .status{ font-weight:700; }
+  .small{ font-size:13px; color:#444; }
+  footer{ margin-top:10px; font-size:12px; color:#666; text-align:center; }
+  @media (max-width:980px){
+    .container{ flex-direction:column; align-items:center; }
+    .left, .right{ width:100%;}
+    :root{ --board-width: 340px; }
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="left card">
+      <div class="controls">
+        <label>Filas: <input id="rows" type="number" min="2" max="12" value="3"></label>
+        <label>Columnas: <input id="cols" type="number" min="2" max="12" value="3"></label>
+        <label>Ancho (px): <input id="boardWidth" type="number" min="200" max="1200" value="800"></label>
+        <button id="newBtn">Nuevo / Mezclar</button>
+        <button id="solveBtn" class="secondary">Mostrar solución</button>
+      </div>
+
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <input id="fileInput" type="file" accept="image/*">
+        <button id="useDefaultBtn" class="secondary">Usar puzzle.jpg</button>
+        <button id="downloadBtn" class="secondary">Descargar imagen</button>
+      </div>
+
+      <div id="board" aria-label="Tablero del rompecabezas"></div>
+      <footer class="small">Arrastra con mouse o con el dedo. Si la pieza queda cerca, encaja sola.</footer>
+    </div>
+
+    <div class="right">
+      <div class="card">
+        <div class="status" id="status">Estado: esperando imagen</div>
+        <div class="small" id="timer">Tiempo: 00:00</div>
+        <div class="small" id="moves">Movimientos: 0</div>
+      </div>
+
+      <div class="card">
+        <div class="small">Vista previa</div>
+        <div class="preview" id="preview">
+          <span class="small">No hay imagen cargada</span>
+        </div>
+      </div>
+
+      <div class="card small">
+        <div><strong>Cómo usar</strong></div>
+        <ul>
+          <li>O pulsa "Cargar imagen" y elige la foto desde tu PC.</li>
+          <li>O guarda tu foto con nombre <code>puzzle.jpg</code> al lado de este HTML y pulsa "Usar puzzle.jpg".</li>
+          <li>Configura filas/columnas y pulsa "Nuevo / Mezclar".</li>
+          <li>Abre la consola (F12 → Console) si ves errores y pégalos aquí si necesitas ayuda.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* Rompecabezas mejorado
+   - Carga imagen desde input o desde 'puzzle.jpg'
+   - Crea piezas como canvas para evitar problemas de background-size
+   - Soporta pointer events (mouse & touch)
+*/
+
+const board = document.getElementById('board');
+const preview = document.getElementById('preview');
+const rowsInput = document.getElementById('rows');
+const colsInput = document.getElementById('cols');
+const boardWidthInput = document.getElementById('boardWidth');
+const newBtn = document.getElementById('newBtn');
+const solveBtn = document.getElementById('solveBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const fileInput = document.getElementById('fileInput');
+const useDefaultBtn = document.getElementById('useDefaultBtn');
+
+const statusEl = document.getElementById('status');
+const timerEl = document.getElementById('timer');
+const movesEl = document.getElementById('moves');
+
+let img = new Image();
+let pieces = [];
+let rows = 3, cols = 3, boardW = 800, boardH = 600;
+let pieceW = 0, pieceH = 0;
+let dragging = null; // {el, pointerId, offsetX, offsetY}
+let moves = 0, timerInterval = null, startTime = null;
+
+function setStatus(txt){ statusEl.textContent = 'Estado: ' + txt; }
+function setPreviewContent(node){
+  preview.innerHTML = ''; preview.appendChild(node);
+}
+
+fileInput.addEventListener('change', (ev)=>{
+  const f = ev.target.files[0];
+  if(!f) return;
+  const url = URL.createObjectURL(f);
+  loadImage(url, f.name);
+});
+
+// intenta cargar puzzle.jpg local (funcionará si el HTML y la imagen están en la misma carpeta)
+useDefaultBtn.addEventListener('click', ()=>{
+  loadImage('puzzle.jpg', 'puzzle.jpg');
+});
+
+function loadImage(src, name){
+  setStatus('cargando imagen...');
+  const tmp = new Image();
+  tmp.onload = () => {
+    img = tmp;
+    setStatus('imagen cargada: ' + name);
+    // muestra preview (escalada)
+    const c = document.createElement('canvas');
+    const maxW = 340;
+    const scale = Math.min(1, maxW / img.width);
+    c.width = Math.round(img.width * scale);
+    c.height = Math.round(img.height * scale);
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    setPreviewContent(c);
+    initPuzzle();
+  };
+  tmp.onerror = (e) => {
+    console.error('Error cargando imagen', e);
+    setStatus('error al cargar imagen. Revisa nombre o usa "Cargar imagen".');
+  };
+  tmp.src = src;
+}
+
+function initPuzzle(){
+  rows = Math.max(2, Math.min(12, parseInt(rowsInput.value) || 3));
+  cols = Math.max(2, Math.min(12, parseInt(colsInput.value) || 3));
+  boardW = Math.max(200, Math.min(1200, parseInt(boardWidthInput.value) || 800));
+
+  // calcular altura manteniendo el ratio
+  const ratio = img.width / img.height;
+  boardH = Math.round(boardW / ratio);
+
+  board.style.width = boardW + 'px';
+  board.style.height = boardH + 'px';
+  document.documentElement.style.setProperty('--board-width', boardW + 'px');
+
+  createPieces();
+  shufflePieces();
+  resetStats();
+}
+
+function createPieces(){
+  // limpiar
+  pieces.forEach(p => p.el && p.el.remove());
+  pieces = [];
+
+  pieceW = board.clientWidth / cols;
+  pieceH = board.clientHeight / rows;
+
+  // para cada celda, crear canvas con el recorte
+  for(let r=0; r<rows; r++){
+    for(let c=0; c<cols; c++){
+      // calcular recorte en la imagen original
+      const sx = Math.round(c * (img.naturalWidth / cols));
+      const sy = Math.round(r * (img.naturalHeight / rows));
+      // ancho/alto fuente (última columna/fila pueden ajustar)
+      const sw = Math.round((c === cols-1) ? (img.naturalWidth - sx) : Math.ceil(img.naturalWidth / cols));
+      const sh = Math.round((r === rows-1) ? (img.naturalHeight - sy) : Math.ceil(img.naturalHeight / rows));
+
+      const canvas = document.createElement('canvas');
+      // canvas tamaño destino (tamaño en tablero)
+      const destW = Math.round(pieceW);
+      const destH = Math.round(pieceH);
+      canvas.width = destW;
+      canvas.height = destH;
+      canvas.className = 'piece-canvas';
+      canvas.style.width = pieceW + 'px';
+      canvas.style.height = pieceH + 'px';
+      canvas.style.left = '0px';
+      canvas.style.top = '0px';
+
+      // dibujar recorte escalado al tamaño de pieza
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, destW, destH);
+
+      // datos
+      canvas.dataset.row = r;
+      canvas.dataset.col = c;
+      canvas.dataset.correctLeft = (c * pieceW);
+      canvas.dataset.correctTop = (r * pieceH);
+      canvas.dataset.snapped = 'false';
+
+      // listeners pointer
+      canvas.addEventListener('pointerdown', onPointerDown);
+
+      board.appendChild(canvas);
+
+      pieces.push({
+        el: canvas,
+        row: r, col: c,
+        correctX: c * pieceW,
+        correctY: r * pieceH,
+        snapped: false
+      });
+    }
+  }
+}
+
+function shufflePieces(){
+  // posiciones posibles (grid)
+  const positions = [];
+  for(let r=0; r<rows; r++){
+    for(let c=0; c<cols; c++){
+      positions.push({x: c*pieceW, y: r*pieceH});
+    }
+  }
+  // mezcla
+  for(let i=positions.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [positions[i], positions[j]] = [positions[j], positions[i]];
+  }
+
+  // asignar posiciones mezcladas y añadir jitter dentro del tablero
+  const padding = Math.min(40, Math.min(pieceW, pieceH) * 0.2);
+  pieces.forEach((p, i) => {
+    const pos = positions[i];
+    const jitterX = (Math.random()*padding*2 - padding);
+    const jitterY = (Math.random()*padding*2 - padding);
+    let x = pos.x + jitterX;
+    let y = pos.y + jitterY;
+    // mantener dentro del tablero
+    x = Math.max(0, Math.min(board.clientWidth - pieceW, x));
+    y = Math.max(0, Math.min(board.clientHeight - pieceH, y));
+    p.el.style.left = x + 'px';
+    p.el.style.top = y + 'px';
+    p.el.style.zIndex = 10 + i;
+    p.snapped = false;
+    p.el.dataset.snapped = 'false';
+    p.el.style.pointerEvents = 'auto';
+  });
+}
+
+function onPointerDown(e){
+  e.preventDefault();
+  const el = e.currentTarget;
+  // no permitir drag si ya está encajada
+  if(el.dataset.snapped === 'true') return;
+
+  // preparar dragging
+  const rect = el.getBoundingClientRect();
+  const boardRect = board.getBoundingClientRect();
+  dragging = {
+    el,
+    pointerId: e.pointerId,
+    offsetX: e.clientX - rect.left,
+    offsetY: e.clientY - rect.top,
+    boardRect
+  };
+
+  try { el.setPointerCapture(e.pointerId); } catch(err){ /* ignore */ }
+
+  // elevar z
+  el.style.zIndex = 2000;
+
+  // listeners globales
+  document.addEventListener('pointermove', onPointerMove);
+  document.addEventListener('pointerup', onPointerUp);
+
+  // estadística
+  moves++;
+  movesEl.textContent = 'Movimientos: ' + moves;
+  if(!startTime){ startTimer(); setStatus('jugando'); }
+}
+
+function onPointerMove(e){
+  if(!dragging || e.pointerId !== dragging.pointerId) return;
+  e.preventDefault();
+  const el = dragging.el;
+  const boardRect = dragging.boardRect;
+  const x = e.clientX - boardRect.left - dragging.offsetX;
+  const y = e.clientY - boardRect.top - dragging.offsetY;
+  // limitar dentro del tablero
+  const boundedX = Math.max(0, Math.min(board.clientWidth - pieceW, x));
+  const boundedY = Math.max(0, Math.min(board.clientHeight - pieceH, y));
+  el.style.left = boundedX + 'px';
+  el.style.top = boundedY + 'px';
+}
+
+function onPointerUp(e){
+  if(!dragging || e.pointerId !== dragging.pointerId) return;
+  e.preventDefault();
+  const el = dragging.el;
+  try { el.releasePointerCapture(e.pointerId); } catch(err){ /* ignore */ }
+
+  // quitar listeners
+  document.removeEventListener('pointermove', onPointerMove);
+  document.removeEventListener('pointerup', onPointerUp);
+
+  // intentar encajar
+  trySnap(el);
+
+  dragging = null;
+}
+
+function trySnap(el){
+  const left = parseFloat(el.style.left || 0);
+  const top = parseFloat(el.style.top || 0);
+  const correctLeft = parseFloat(el.dataset.correctLeft);
+  const correctTop = parseFloat(el.dataset.correctTop);
+
+  const dx = left - correctLeft;
+  const dy = top - correctTop;
+  const dist = Math.hypot(dx, dy);
+
+  const threshold = Math.max(16, Math.min(pieceW, pieceH) * 0.25);
+  if(dist <= threshold){
+    // encaja
+    el.style.left = correctLeft + 'px';
+    el.style.top = correctTop + 'px';
+    el.dataset.snapped = 'true';
+    el.style.pointerEvents = 'none';
+    // marcar en piezas array
+    const p = pieces.find(x => x.el === el);
+    if(p) p.snapped = true;
+    el.style.boxShadow = '0 3px 8px rgba(0,0,0,0.06)';
+    checkWin();
+  } else {
+    // mantener arrastrable
+    const p = pieces.find(x => x.el === el);
+    if(p) p.snapped = false;
+  }
+}
+
+function checkWin(){
+  const all = pieces.every(p => p.snapped);
+  if(all){
+    stopTimer();
+    setStatus('¡Completado! 🎉');
+    // pequeña animación
+    pieces.forEach((p, i) => {
+      p.el.style.transition = 'transform .3s';
+      p.el.style.transform = 'scale(1.02)';
+      setTimeout(()=> p.el.style.transform = '', 200 + i*12);
+    });
+  }
+}
+
+function resetStats(){
+  moves = 0; movesEl.textContent = 'Movimientos: 0';
+  timerEl.textContent = 'Tiempo: 00:00';
+  startTime = null;
+  stopTimer();
+  setStatus('listo');
+}
+
+function startTimer(){
+  startTime = Date.now();
+  timerInterval = setInterval(()=>{
+    const s = Math.floor((Date.now() - startTime)/1000);
+    const mm = String(Math.floor(s/60)).padStart(2,'0');
+    const ss = String(s%60).padStart(2,'0');
+    timerEl.textContent = 'Tiempo: ' + mm + ':' + ss;
+  }, 500);
+}
+
+function stopTimer(){
+  if(timerInterval) clearInterval(timerInterval);
+  timerInterval = null;
+}
+
+// BOTONES
+newBtn.addEventListener('click', ()=>{
+  if(!img || !img.src) { alert('Primero carga una imagen (archivo o puzzle.jpg).'); return; }
+  // limpiar tablero
+  while(board.firstChild) board.removeChild(board.firstChild);
+  initPuzzle();
+});
+
+solveBtn.addEventListener('click', ()=>{
+  pieces.forEach((p,i)=>{
+    p.el.style.left = p.correctX + 'px';
+    p.el.style.top = p.correctY + 'px';
+    p.el.dataset.snapped = 'true';
+    p.el.style.pointerEvents = 'none';
+    p.snapped = true;
+  });
+  stopTimer();
+  setStatus('Solución mostrada');
+  checkWin();
+});
+
+downloadBtn.addEventListener('click', ()=>{
+  if(!img || !img.naturalWidth) { alert('No hay imagen disponible para descargar.'); return; }
+  // dibujar la imagen original completa en canvas de salida
+  const out = document.createElement('canvas');
+  out.width = img.naturalWidth;
+  out.height = img.naturalHeight;
+  const ctx = out.getContext('2d');
+  ctx.drawImage(img, 0, 0, out.width, out.height);
+
+  const link = document.createElement('a');
+  link.href = out.toDataURL('image/jpeg', 0.95);
+  link.download = 'puzzle-completed.jpg';
+  link.click();
+});
+
+// cargar inicio si la imagen ya estuviera (ej. si usas puzzle.jpg en misma carpeta y abres el HTML)
+window.addEventListener('load', ()=>{
+  // nada automático; usuario debe elegir o pulsar "Usar puzzle.jpg"
+});
+
+// ayuda básica al usuario si algo falla
+window.addEventListener('error', (e) => {
+  console.error('Error global:', e);
+});
+
+</script>
+</body>
+</html>
